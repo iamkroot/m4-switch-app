@@ -50,21 +50,28 @@ public class M4SwitchReceiver extends BroadcastReceiver {
                     if (showToast) {
                         M4Manager.showToast(context, sb.toString().trim());
                     }
+                    pendingResult.setResultCode(0);
+                    pendingResult.setResultData(sb.toString().trim());
                 } else {
                     M4Manager.SwitchResult result = M4Manager.switchDevice(context, mac, targetDisconnect, targetConnect);
                     Log.i(TAG, "M4 Switch result: " + result.message);
                     if (showToast && result.message != null && !result.message.isEmpty()) {
                         M4Manager.showToast(context, result.message);
                     }
+                    pendingResult.setResultCode(result.success ? 0 : 1);
+                    pendingResult.setResultData(result.message);
                 }
             } catch (Exception e) {
                 Log.e(TAG, "Error executing M4 switch: " + e.getMessage(), e);
                 if (showToast) {
                     M4Manager.showToast(context, "M4 Switch Error: " + e.getMessage());
                 }
+                pendingResult.setResultCode(1);
+                pendingResult.setResultData("Error: " + e.getMessage());
             } finally {
                 pendingResult.finish();
             }
+
         }).start();
     }
 

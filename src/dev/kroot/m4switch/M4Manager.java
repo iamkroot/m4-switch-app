@@ -143,14 +143,14 @@ public class M4Manager {
         // 1. Get paired devices count (0x1400)
         out.write(buildFrame(CMD_GET_PAIRED_COUNT, null));
         out.flush();
-        Frame fCount = readFrame(in);
+        Frame fCount = readFrameForCmd(in, CMD_GET_PAIRED_COUNT);
         int count = ByteBuffer.wrap(fCount.payload).order(ByteOrder.BIG_ENDIAN).getShort() & 0xFFFF;
         Log.i(TAG, "M4 paired device count: " + count);
 
         // 2. Get own device index (0x1407)
         out.write(buildFrame(CMD_GET_OWN_INDEX, null));
         out.flush();
-        Frame fOwn = readFrame(in);
+        Frame fOwn = readFrameForCmd(in, CMD_GET_OWN_INDEX);
         int ownIndex = fOwn.payload[0] & 0xFF;
         Log.i(TAG, "Own device index: " + ownIndex);
 
@@ -159,7 +159,7 @@ public class M4Manager {
         for (int i = 0; i < count; i++) {
             out.write(buildFrame(CMD_GET_DEVICE_INFO, new byte[]{(byte) i}));
             out.flush();
-            Frame fDev = readFrame(in);
+            Frame fDev = readFrameForCmd(in, CMD_GET_DEVICE_INFO);
             DeviceInfo d = new DeviceInfo();
             d.index = fDev.payload[0] & 0xFF;
             d.priority = fDev.payload[1] & 0xFF;
@@ -266,11 +266,30 @@ public class M4Manager {
                     Log.i(TAG, "Disconnecting " + toDisconnect.name + " (idx=" + toDisconnect.index + ")");
                     out.write(buildFrame(CMD_DISCONNECT_DEVICE, new byte[]{(byte) toDisconnect.index}));
                     out.flush();
-                    Frame ack = readFrame(in);
+                    Frame ack = readFrameForCmd(in, CMD_DISCONNECT_DEVICE);
                     Log.i(TAG, "Disconnect ACK cmd: 0x" + Integer.toHexString(ack.cmd));
                     res.disconnectedDevice = toDisconnect;
                     msg.append("Disconnected ").append(toDisconnect.name).append(". ");
-                    Thread.sleep(300);
+
+                    // Actively poll until M4 actually reports toDisconnect as disconnected
+                    boolean confirmedDisconnected = false;
+                    for (int attempt = 0; attempt < 25; attempt++) {
+                        Thread.sleep(100);
+                        out.write(buildFrame(CMD_GET_DEVICE_INFO, new byte[]{(byte) toDisconnect.index}));
+                        out.flush();
+                        Frame fDev = readFrameForCmd(in, CMD_GET_DEVICE_INFO);
+                        boolean isConn = (fDev.payload[2] & 0xFF) == 1;
+                        if (!isConn) {
+                            Log.i(TAG, toDisconnect.name + " confirmed disconnected after " + ((attempt + 1) * 100) + "ms");
+                            confirmedDisconnected = true;
+                            break;
+                        }
+                    }
+                    if (!confirmedDisconnected) {
+                        Log.w(TAG, toDisconnect.name + " disconnect confirmation timed out, proceeding");
+                    }
+                    // Minimal settling pause
+                    Thread.sleep(100);
                 } else {
                     Log.i(TAG, toDisconnect.name + " is already disconnected.");
                 }
@@ -282,15 +301,45 @@ public class M4Manager {
                     Log.i(TAG, "Connecting " + toConnect.name + " (idx=" + toConnect.index + ")");
                     out.write(buildFrame(CMD_CONNECT_DEVICE, new byte[]{(byte) toConnect.index}));
                     out.flush();
-                    Frame ack = readFrame(in);
+                    Frame ack = readFrameForCmd(in, CMD_CONNECT_DEVICE);
                     Log.i(TAG, "Connect ACK cmd: 0x" + Integer.toHexString(ack.cmd));
                     res.connectedDevice = toConnect;
-                    if (toDisconnect != null && toDisconnect.connected) {
-                        msg.append("Disconnected ").append(toDisconnect.name).append(" & connecting ").append(toConnect.name).append("...");
-                    } else {
-                        msg.append("Connecting ").append(toConnect.name).append("...");
+
+                    // Poll to verify if toConnect becomes connected
+                    boolean confirmedConnected = false;
+                    for (int attempt = 0; attempt < 10; attempt++) {
+                        Thread.sleep(150);
+                        out.write(buildFrame(CMD_GET_DEVICE_INFO, new byte[]{(byte) toConnect.index}));
+                        out.flush();
+                        Frame fDev = readFrameForCmd(in, CMD_GET_DEVICE_INFO);
+                        boolean isConn = (fDev.payload[2] & 0xFF) == 1;
+                        if (isConn) {
+                            Log.i(TAG, toConnect.name + " confirmed connected after " + ((attempt + 1) * 150) + "ms");
+                            confirmedConnected = true;
+                            break;
+                        }
+                        if (attempt == 4) {
+                            // Re-trigger connect once if not connected yet after ~750ms
+                            Log.i(TAG, "Re-triggering connect for " + toConnect.name);
+                            out.write(buildFrame(CMD_CONNECT_DEVICE, new byte[]{(byte) toConnect.index}));
+                            out.flush();
+                            readFrameForCmd(in, CMD_CONNECT_DEVICE);
+                        }
                     }
-                    Thread.sleep(600);
+
+                    if (confirmedConnected) {
+                        if (toDisconnect != null && toDisconnect.connected) {
+                            msg.append("Disconnected ").append(toDisconnect.name).append(" & connected ").append(toConnect.name).append(".");
+                        } else {
+                            msg.append("Connected ").append(toConnect.name).append(".");
+                        }
+                    } else {
+                        if (toDisconnect != null && toDisconnect.connected) {
+                            msg.append("Disconnected ").append(toDisconnect.name).append(" & connecting ").append(toConnect.name).append("...");
+                        } else {
+                            msg.append("Connecting ").append(toConnect.name).append("...");
+                        }
+                    }
                 } else {
                     Log.i(TAG, toConnect.name + " is already connected.");
                     msg.append(toConnect.name).append(" is already connected.");
@@ -375,9 +424,23 @@ public class M4Manager {
         return f;
     }
 
+    public static Frame readFrameForCmd(InputStream in, int expectedCmd) throws IOException {
+        long deadline = System.currentTimeMillis() + 4000;
+        while (System.currentTimeMillis() < deadline) {
+            Frame f = readFrame(in);
+            int expectedAck = expectedCmd + 0x0100;
+            if (f.cmd == expectedCmd || f.cmd == expectedAck || (f.cmd & 0x7FFF) == (expectedCmd & 0x7FFF)) {
+                return f;
+            }
+            Log.d(TAG, "Ignoring asynchronous/unsolicited GAIA frame: 0x" + Integer.toHexString(f.cmd));
+        }
+        throw new IOException("Timed out waiting for response to 0x" + Integer.toHexString(expectedCmd));
+    }
+
     public static void showToast(Context context, String msg) {
         new Handler(Looper.getMainLooper()).post(() -> {
             Toast.makeText(context.getApplicationContext(), msg, Toast.LENGTH_SHORT).show();
         });
     }
 }
+
