@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">M4 Switcher</string>
+    <string name="app_subtitle">Sennheiser Multipoint Manager</string>
+    <string name="currently_connected">Currently Connected</string>
+    <string name="paired_connections">Paired Connections</string>
+    <string name="refresh_button">Refresh Connections</string>
+    <string name="action_connect">Connect</string>
+    <string name="action_disconnect">Disconnect</string>
+    <string name="this_phone">This Phone</string>
+    <string name="change_mac">Change</string>
+    <string name="mac_label">Target MAC:</string>
+</resources>
